@@ -1,0 +1,402 @@
+"""
+Storage. Postgres when AC_DATABASE_URL is set, SQLite otherwise.
+
+SQLite is for local development and the smoke test. Any real deployment on a
+serverless or scale-to-zero host has an ephemeral filesystem, so SQLite there
+silently loses every session, detection and ban record - and the ban history is
+what `distinct_banned_accounts_for_ip` depends on.
+
+Fail-open policy
+----------------
+Free database tiers can stop dead: Neon suspends compute when you exceed a
+monthly limit, hosts restart, connections drop. An anti-cheat that 500s when its
+database is unavailable locks out every honest player while doing nothing to a
+cheater, who simply stops calling us.
+
+So reads that inform a decision raise DatabaseUnavailable, and the API layer
+turns that into "degraded, trust = watch" rather than an error. Writes that only
+record evidence are allowed to fail quietly - losing a log line is better than
+losing a login.
+"""
+import json
+import os
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+
+from config import config
+
+_local = threading.local()
+
+DATABASE_URL = os.environ.get("AC_DATABASE_URL", "").strip()
+IS_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+if IS_POSTGRES:
+    import psycopg
+    from psycopg.rows import dict_row
+
+
+class DatabaseUnavailable(Exception):
+    """Storage is unreachable. Callers must degrade, never punish."""
+
+
+# --- schema ---------------------------------------------------------------
+
+_SERIAL = "BIGSERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS challenges (
+    nonce           TEXT PRIMARY KEY,
+    playfab_id      TEXT NOT NULL,
+    issued_at       BIGINT NOT NULL,
+    consumed_at     BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_challenges_player ON challenges(playfab_id);
+CREATE INDEX IF NOT EXISTS idx_challenges_issued ON challenges(issued_at);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id      TEXT PRIMARY KEY,
+    playfab_id      TEXT NOT NULL,
+    meta_user_id    TEXT,
+    device_id       TEXT,
+    ip              TEXT,
+    trust           TEXT NOT NULL,
+    score           BIGINT NOT NULL DEFAULT 0,
+    started_at      BIGINT NOT NULL,
+    last_seen_at    BIGINT NOT NULL,
+    ended_at        BIGINT,
+    attested_at     BIGINT,
+    claims_json     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_player ON sessions(playfab_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_device ON sessions(device_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(ip);
+
+CREATE TABLE IF NOT EXISTS detections (
+    id              __SERIAL__,
+    session_id      TEXT,
+    playfab_id      TEXT,
+    meta_user_id    TEXT,
+    device_id       TEXT,
+    ip              TEXT,
+    signal          TEXT NOT NULL,
+    severity        BIGINT NOT NULL,
+    confidence      TEXT NOT NULL,
+    detail_json     TEXT,
+    created_at      BIGINT NOT NULL,
+    review_state    TEXT NOT NULL DEFAULT 'open',
+    reviewed_by     TEXT,
+    reviewed_at     BIGINT,
+    review_note     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_detections_player ON detections(playfab_id);
+CREATE INDEX IF NOT EXISTS idx_detections_state ON detections(review_state);
+CREATE INDEX IF NOT EXISTS idx_detections_created ON detections(created_at);
+
+CREATE TABLE IF NOT EXISTS enforcements (
+    id              __SERIAL__,
+    playfab_id      TEXT,
+    ip              TEXT,
+    action          TEXT NOT NULL,
+    duration_hours  BIGINT,
+    reason          TEXT,
+    automatic       BIGINT NOT NULL DEFAULT 1,
+    detection_ids   TEXT,
+    created_at      BIGINT NOT NULL,
+    result_json     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_enforcements_player ON enforcements(playfab_id);
+CREATE INDEX IF NOT EXISTS idx_enforcements_ip ON enforcements(ip);
+""".replace("__SERIAL__", _SERIAL)
+
+
+# --- connection handling --------------------------------------------------
+
+def _connect():
+    if IS_POSTGRES:
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row,
+                               connect_timeout=10, autocommit=False)
+    conn = sqlite3.connect(config.DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _healthy(conn):
+    if conn is None:
+        return False
+    if IS_POSTGRES:
+        return not conn.closed
+    return True
+
+
+def get_conn():
+    """
+    One connection per thread, reconnected if the far end went away - which on
+    a scale-to-zero database happens routinely, not exceptionally.
+    """
+    conn = getattr(_local, "conn", None)
+    if not _healthy(conn):
+        try:
+            conn = _local.conn = _connect()
+        except Exception as exc:
+            _local.conn = None
+            raise DatabaseUnavailable(str(exc))
+    return conn
+
+
+def _q(sql):
+    """SQLite uses ?, psycopg uses %s. One dialect in the source, both at runtime."""
+    return sql.replace("?", "%s") if IS_POSTGRES else sql
+
+
+@contextmanager
+def tx():
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except DatabaseUnavailable:
+        raise
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        # A dropped connection surfaces here; make it recoverable next call.
+        if IS_POSTGRES and isinstance(exc, psycopg.OperationalError):
+            _local.conn = None
+            raise DatabaseUnavailable(str(exc))
+        raise
+
+
+def _exec(conn, sql, args=()):
+    cur = conn.cursor()
+    cur.execute(_q(sql), args)
+    return cur
+
+
+def quiet(fn, *a, **kw):
+    """
+    Run a write whose only purpose is to record evidence. If storage is down we
+    would rather drop the log line than fail the player's request.
+    Returns None on failure.
+    """
+    try:
+        return fn(*a, **kw)
+    except DatabaseUnavailable:
+        return None
+    except Exception:
+        return None
+
+
+def init_db():
+    try:
+        with tx() as conn:
+            if IS_POSTGRES:
+                _exec(conn, SCHEMA)
+            else:
+                conn.executescript(SCHEMA)
+        return True
+    except Exception:
+        # Do not crash the worker on boot; /health will report it.
+        return False
+
+
+def ping():
+    try:
+        with tx() as conn:
+            _exec(conn, "SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
+def now():
+    return int(time.time())
+
+
+# --- challenges -----------------------------------------------------------
+
+def store_challenge(nonce, playfab_id):
+    with tx() as conn:
+        _exec(conn, "INSERT INTO challenges (nonce, playfab_id, issued_at)"
+                    " VALUES (?,?,?)", (nonce, playfab_id, now()))
+
+
+def consume_challenge(nonce, playfab_id):
+    """
+    Single use, bound to one player. The UPDATE ... WHERE consumed_at IS NULL is
+    the atomic part: two racing requests cannot both win it.
+    """
+    with tx() as conn:
+        cur = _exec(conn,
+                    "UPDATE challenges SET consumed_at=? "
+                    "WHERE nonce=? AND playfab_id=? AND consumed_at IS NULL",
+                    (now(), nonce, playfab_id))
+        if cur.rowcount != 1:
+            return None
+        return _exec(conn, "SELECT * FROM challenges WHERE nonce=?",
+                     (nonce,)).fetchone()
+
+
+def purge_expired_challenges():
+    cutoff = now() - config.CHALLENGE_TTL_SECONDS * 4
+    with tx() as conn:
+        _exec(conn, "DELETE FROM challenges WHERE issued_at < ?", (cutoff,))
+
+
+# --- sessions -------------------------------------------------------------
+
+def create_session(session_id, playfab_id, meta_user_id, device_id, ip,
+                   trust, score, claims):
+    ts = now()
+    with tx() as conn:
+        _exec(conn,
+              "INSERT INTO sessions (session_id, playfab_id, meta_user_id,"
+              " device_id, ip, trust, score, started_at, last_seen_at,"
+              " attested_at, claims_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+              (session_id, playfab_id, meta_user_id, device_id, ip, trust,
+               score, ts, ts, ts, json.dumps(claims or {})))
+
+
+def get_session(session_id):
+    with tx() as conn:
+        return _exec(conn, "SELECT * FROM sessions WHERE session_id=?",
+                     (session_id,)).fetchone()
+
+
+def touch_session(session_id, trust=None, score=None, attested=False):
+    sets, vals = ["last_seen_at=?"], [now()]
+    if trust is not None:
+        sets.append("trust=?")
+        vals.append(trust)
+    if score is not None:
+        sets.append("score=?")
+        vals.append(score)
+    if attested:
+        sets.append("attested_at=?")
+        vals.append(now())
+    vals.append(session_id)
+    with tx() as conn:
+        _exec(conn, "UPDATE sessions SET %s WHERE session_id=?" % ",".join(sets),
+              vals)
+
+
+def end_session(session_id):
+    with tx() as conn:
+        _exec(conn, "UPDATE sessions SET ended_at=? WHERE session_id=?"
+                    " AND ended_at IS NULL", (now(), session_id))
+
+
+# --- detections -----------------------------------------------------------
+
+def record_detection(signal, severity, confidence, session=None, detail=None,
+                     playfab_id=None, ip=None):
+    sid = session["session_id"] if session else None
+    pid = playfab_id or (session["playfab_id"] if session else None)
+    muid = session["meta_user_id"] if session else None
+    did = session["device_id"] if session else None
+    addr = ip or (session["ip"] if session else None)
+
+    sql = ("INSERT INTO detections (session_id, playfab_id, meta_user_id,"
+           " device_id, ip, signal, severity, confidence, detail_json,"
+           " created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    args = (sid, pid, muid, did, addr, signal, severity, confidence,
+            json.dumps(detail or {}), now())
+
+    with tx() as conn:
+        if IS_POSTGRES:
+            return _exec(conn, sql + " RETURNING id", args).fetchone()["id"]
+        return _exec(conn, sql, args).lastrowid
+
+
+def list_detections(state=None, playfab_id=None, limit=100, offset=0):
+    q, args = "SELECT * FROM detections WHERE 1=1", []
+    if state:
+        q += " AND review_state=?"
+        args.append(state)
+    if playfab_id:
+        q += " AND playfab_id=?"
+        args.append(playfab_id)
+    q += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    args += [limit, offset]
+    with tx() as conn:
+        return _exec(conn, q, args).fetchall()
+
+
+def set_review_state(detection_id, state, reviewer, note=None):
+    with tx() as conn:
+        cur = _exec(conn,
+                    "UPDATE detections SET review_state=?, reviewed_by=?,"
+                    " reviewed_at=?, review_note=? WHERE id=?",
+                    (state, reviewer, now(), note, detection_id))
+        return cur.rowcount == 1
+
+
+def prune_detections(days=None, keep_states=("confirmed", "actioned")):
+    """
+    Retention. The detections table only grows, and 0.5 GB of free Postgres
+    fills eventually. Reviewed-and-confirmed rows are kept as the evidence
+    trail; routine noise ages out.
+
+    Returns the number of rows removed.
+    """
+    # `days or DEFAULT` would swallow 0, which is a legitimate
+    # "prune everything" request.
+    days = config.DETECTION_RETENTION_DAYS if days is None else int(days)
+    cutoff = now() - days * 86400
+    placeholders = ",".join("?" for _ in keep_states)
+    with tx() as conn:
+        cur = _exec(conn,
+                    "DELETE FROM detections WHERE created_at < ?"
+                    " AND review_state NOT IN (%s)" % placeholders,
+                    (cutoff,) + tuple(keep_states))
+        return cur.rowcount
+
+
+def storage_stats():
+    with tx() as conn:
+        out = {}
+        for table in ("challenges", "sessions", "detections", "enforcements"):
+            row = _exec(conn, "SELECT COUNT(*) AS n FROM %s" % table).fetchone()
+            out[table] = row["n"]
+        return out
+
+
+# --- enforcement ----------------------------------------------------------
+
+def record_enforcement(action, playfab_id=None, ip=None, duration_hours=None,
+                       reason=None, automatic=True, detection_ids=None,
+                       result=None):
+    sql = ("INSERT INTO enforcements (playfab_id, ip, action, duration_hours,"
+           " reason, automatic, detection_ids, created_at, result_json)"
+           " VALUES (?,?,?,?,?,?,?,?,?)")
+    args = (playfab_id, ip, action, duration_hours, reason,
+            1 if automatic else 0, json.dumps(detection_ids or []), now(),
+            json.dumps(result or {}))
+    with tx() as conn:
+        if IS_POSTGRES:
+            return _exec(conn, sql + " RETURNING id", args).fetchone()["id"]
+        return _exec(conn, sql, args).lastrowid
+
+
+def distinct_banned_accounts_for_ip(ip):
+    """Repeat-offender signal: separate accounts we have banned on this address."""
+    if not ip:
+        return 0
+    with tx() as conn:
+        row = _exec(conn,
+                    "SELECT COUNT(DISTINCT playfab_id) AS n FROM enforcements"
+                    " WHERE ip=? AND action LIKE 'ban_account%'"
+                    " AND playfab_id IS NOT NULL", (ip,)).fetchone()
+    return (row["n"] if row else 0) or 0
+
+
+def ip_already_banned(ip):
+    if not ip:
+        return False
+    with tx() as conn:
+        return _exec(conn, "SELECT 1 AS x FROM enforcements WHERE ip=?"
+                           " AND action='ban_ip' LIMIT 1", (ip,)).fetchone() is not None
