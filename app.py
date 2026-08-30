@@ -18,7 +18,7 @@ import functools
 import time
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 
 import attestation
 import db
@@ -210,6 +210,15 @@ def register_routes(app):
                 or "rewrite" in k.lower() or "forwarded" in k.lower()
             ),
         }), 404
+
+    @app.get("/")
+    def index():
+        """
+        Deliberately says nothing useful. Anyone poking at the root of an
+        anti-cheat service is not the audience for a feature list, and an
+        endpoint inventory is a free map for whoever wants to work around it.
+        """
+        return Response("really cool backend\n", mimetype="text/plain")
 
     @app.get("/health")
     def health():
