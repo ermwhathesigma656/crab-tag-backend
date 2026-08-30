@@ -199,16 +199,70 @@ def quiet(fn, *a, **kw):
         return None
 
 
-def init_db():
+# Columns added after the first schema shipped. CREATE TABLE IF NOT EXISTS does
+# nothing to an existing table, so a deployment migrated before these landed
+# keeps the old shape and every insert touching the new column fails at runtime.
+# Applied only where the column is genuinely absent.
+_ADDED_COLUMNS = [
+    ("enforcements", "device_id", "TEXT"),
+]
+
+
+def _existing_columns(conn, table):
+    if IS_POSTGRES:
+        rows = _exec(conn,
+                     "SELECT column_name FROM information_schema.columns"
+                     " WHERE table_name=?", (table,)).fetchall()
+        return set(r["column_name"] for r in rows)
+    rows = _exec(conn, "PRAGMA table_info(%s)" % table).fetchall()
+    return set(r["name"] for r in rows)
+
+
+def _apply_column_migrations(conn):
+    applied = []
+    for table, column, coltype in _ADDED_COLUMNS:
+        try:
+            if column in _existing_columns(conn, table):
+                continue
+            _exec(conn, "ALTER TABLE %s ADD COLUMN %s %s" % (table, column, coltype))
+            applied.append("%s.%s" % (table, column))
+        except Exception:
+            # Missing table is fine: SCHEMA above just created it with the
+            # column already present.
+            pass
+    return applied
+
+
+def init_db(raise_on_error=False):
+    """
+    Column migrations run BEFORE the schema, not after.
+
+    SCHEMA declares an index on enforcements(device_id); on a database created
+    before that column existed, the index statement aborts the whole script and
+    nothing else in it gets applied. Adding the column first makes the schema
+    valid in both cases - on a fresh database the migration is a harmless no-op
+    because the table does not exist yet.
+    """
     try:
+        try:
+            with tx() as conn:
+                _apply_column_migrations(conn)
+        except Exception:
+            pass                      # fresh database: nothing to migrate yet
+
         with tx() as conn:
             if IS_POSTGRES:
                 _exec(conn, SCHEMA)
             else:
                 conn.executescript(SCHEMA)
+
+        with tx() as conn:
+            _apply_column_migrations(conn)
         return True
     except Exception:
-        # Do not crash the worker on boot; /health will report it.
+        # Do not crash the worker on boot; /health reports it instead.
+        if raise_on_error:
+            raise
         return False
 
 
