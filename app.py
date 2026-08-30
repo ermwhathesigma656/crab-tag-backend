@@ -22,6 +22,7 @@ from flask import Flask, g, jsonify, request
 
 import attestation
 import db
+import netcheck
 import routing
 import sessions
 import trust
@@ -311,6 +312,21 @@ def register_routes(app):
             bound_meta_user_id=None)
 
         signals += trust.evaluate_client_report(client_report)
+        signals += trust.evaluate_modules(client_report, config)
+
+        # --- ban evasion -----------------------------------------------
+        # device_unique_id is part of Meta's signed claims, so it identifies the
+        # physical headset regardless of account, Meta login or IP. That is what
+        # actually stops evasion; the network verdict is context around it.
+        device_id = summary.get("device_unique_id")
+        prior_bans, prior_accounts = db.quiet(
+            db.prior_bans_for_device, device_id) or (0, 0)
+        other_accounts = db.quiet(
+            db.accounts_seen_on_device, device_id, playfab_id) or []
+        network = netcheck.lookup(ip)
+        signals += trust.evaluate_evasion(
+            device_id, prior_bans, prior_accounts, network,
+            other_accounts, config)
 
         total = trust.score(signals)
         level = trust.trust_for_score(total, config)
@@ -322,6 +338,8 @@ def register_routes(app):
         session_row = db.get_session(session_id)
 
         detection_ids = routing.route(session_row, signals, level, total)
+        if prior_bans > 0:
+            routing.report_evasion(session_row, network, prior_bans, prior_accounts)
         action = routing.enforce(session_row, signals, level, total, detection_ids)
 
         if level == trust.BLOCKED and config.ENFORCE:

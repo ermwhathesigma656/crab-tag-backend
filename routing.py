@@ -123,7 +123,7 @@ def _playfab_admin(endpoint, body):
 
 
 def ban_account(playfab_id, reason, hours=None, detection_ids=None,
-                automatic=True):
+                automatic=True, device_id=None):
     """hours=None means permanent."""
     ban = {"PlayFabId": playfab_id, "Reason": reason[:140]}
     if hours is not None:
@@ -131,13 +131,15 @@ def ban_account(playfab_id, reason, hours=None, detection_ids=None,
     result = _playfab_admin("BanUsers", {"Bans": [ban]})
     db.record_enforcement(
         action="ban_account_permanent" if hours is None else "ban_account",
-        playfab_id=playfab_id, duration_hours=hours, reason=reason,
-        automatic=automatic, detection_ids=detection_ids, result=result,
+        playfab_id=playfab_id, device_id=device_id, duration_hours=hours,
+        reason=reason, automatic=automatic, detection_ids=detection_ids,
+        result=result,
     )
     return result
 
 
-def ban_ip(ip, playfab_id, reason, detection_ids=None, automatic=True):
+def ban_ip(ip, playfab_id, reason, detection_ids=None, automatic=True,
+           device_id=None):
     """
     Permanent IP ban. PlayFab's own note on this field: "May affect multiple
     players." Only ever called from the escalation path below.
@@ -148,9 +150,9 @@ def ban_ip(ip, playfab_id, reason, detection_ids=None, automatic=True):
         "Reason": reason[:140],
     }]})
     db.record_enforcement(
-        action="ban_ip", playfab_id=playfab_id, ip=ip, duration_hours=None,
-        reason=reason, automatic=automatic, detection_ids=detection_ids,
-        result=result,
+        action="ban_ip", playfab_id=playfab_id, ip=ip, device_id=device_id,
+        duration_hours=None, reason=reason, automatic=automatic,
+        detection_ids=detection_ids, result=result,
     )
     _post_webhook(
         config.DISCORD_WEBHOOK_MODERATION, "IP BAN APPLIED",
@@ -179,7 +181,9 @@ def enforce(session, signals, trust_level, total_score, detection_ids):
 
     playfab_id = session["playfab_id"] if session else None
     ip = session["ip"] if session else None
-    summary = ", ".join(sorted({s.name for s in signals}))[:120]
+    device_id = session["device_id"] if session else None
+    names = {s.name for s in signals}
+    summary = ", ".join(sorted(names))[:120]
     reason = "Anti-cheat: %s" % summary
 
     if not config.ENFORCE:
@@ -188,17 +192,69 @@ def enforce(session, signals, trust_level, total_score, detection_ids):
 
     outcome = {"action": "ban_account_permanent", "reason": reason}
     outcome["account"] = ban_account(
-        playfab_id, reason, hours=None, detection_ids=detection_ids)
+        playfab_id, reason, hours=None, detection_ids=detection_ids,
+        device_id=device_id)
 
-    # Escalation: only after this IP has produced repeated banned accounts.
-    # One unlucky player behind a shared address loses an account, not a
-    # household.
-    if ip and not db.ip_already_banned(ip):
+    # An IP ban is permanent and, in PlayFab's own words, "may affect multiple
+    # players" - so it needs a reason that cannot have been faked. Only signals
+    # Meta signed qualify: a repacked APK, the wrong signing certificate, a
+    # failed device-integrity check, or a device already banned before.
+    signed_names = {s.name for s in signals if s.confidence == trust.SIGNED}
+    hard_evidence = signed_names & {
+        "meta.app_integrity", "meta.cert_digest", "meta.package_id",
+        "meta.device_integrity", "meta.device_banned", "meta.token_rejected",
+        "evasion.banned_device",
+    }
+
+    should_ip_ban = False
+    ip_reason = None
+
+    if hard_evidence and config.IP_BAN_ON_ATTESTATION_FAILURE:
+        should_ip_ban = True
+        ip_reason = "Modified build or untrusted device: %s" % (
+            ", ".join(sorted(hard_evidence))[:90])
+
+    if not should_ip_ban and ip:
         distinct = db.distinct_banned_accounts_for_ip(ip)
         if distinct >= config.IP_BAN_AFTER_DISTINCT_ACCOUNTS:
-            outcome["action"] = "ban_account_permanent+ban_ip"
-            outcome["ip"] = ban_ip(
-                ip, playfab_id,
-                "Ban evasion: %d accounts from this address" % distinct,
-                detection_ids=detection_ids)
+            should_ip_ban = True
+            ip_reason = "Ban evasion: %d accounts from this address" % distinct
+
+    if should_ip_ban and ip and not db.ip_already_banned(ip):
+        outcome["action"] = "ban_account_permanent+ban_ip"
+        outcome["ip"] = ban_ip(ip, playfab_id, ip_reason,
+                               detection_ids=detection_ids, device_id=device_id)
+        outcome["ip_reason"] = ip_reason
+
     return outcome
+
+
+def report_evasion(session, network, prior_bans, prior_accounts):
+    """
+    A returning banned device, announced separately from the trust embed so it
+    lands in the moderation channel with the context a human needs.
+    """
+    device_id = session["device_id"] if session else "?"
+    net = "none"
+    if network is not None and network.checked:
+        net = "%s (%s)" % (
+            "tor" if network.is_tor else
+            "vpn" if network.is_vpn else
+            "hosting" if network.is_hosting else
+            "proxy" if network.is_proxy else "clean",
+            network.provider or network.source)
+
+    _post_webhook(
+        config.DISCORD_WEBHOOK_MODERATION,
+        "BAN EVASION DETECTED",
+        "A device with **%d prior ban(s)** across **%d account(s)** attested on "
+        "a new account.\n\nMeta signs the device id, so changing account, Meta "
+        "login or IP does not hide it." % (prior_bans, prior_accounts),
+        SEVERITY_COLOURS["block"],
+        fields={
+            "New account": session["playfab_id"] if session else "?",
+            "Device": device_id,
+            "IP": (session["ip"] if session else "?") or "-",
+            "Network": net,
+        },
+    )

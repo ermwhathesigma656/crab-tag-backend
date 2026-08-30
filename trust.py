@@ -91,6 +91,79 @@ def evaluate_attestation(summary, cfg):
     return signals
 
 
+def evaluate_evasion(device_id, prior_bans, prior_accounts, network,
+                     accounts_on_device, cfg):
+    """
+    Ban evasion.
+
+    device_unique_id comes out of Meta's signed claims, so it survives a new
+    account, a new Meta login and a new IP. That is why this - not the VPN
+    check - is what actually stops evasion. The network verdict is context for
+    the moderator and a small score bump, never the reason on its own: plenty
+    of honest players use a VPN, and a cheater who does not use one would sail
+    past an IP-only rule.
+    """
+    signals = []
+
+    if cfg.DEVICE_EVASION_ENABLED and prior_bans > 0:
+        signals.append(Signal(
+            "evasion.banned_device", 100, SIGNED,
+            {"device_id": device_id, "prior_bans": prior_bans,
+             "prior_accounts": prior_accounts}))
+
+    # Many accounts from one physical device is not proof of anything - shared
+    # headsets exist - so it is weighted as a hint, not a verdict.
+    if len(accounts_on_device) >= 4:
+        signals.append(Signal(
+            "evasion.many_accounts_one_device", 20, SIGNED,
+            {"accounts": len(accounts_on_device)}))
+
+    if network is not None and network.checked and network.anonymised:
+        kind = ("tor" if network.is_tor else
+                "vpn" if network.is_vpn else
+                "hosting" if network.is_hosting else "proxy")
+        # Tor and datacenter addresses are rarer among ordinary players than a
+        # consumer VPN, so they weigh a little more.
+        severity = {"tor": 25, "hosting": 20, "vpn": 10, "proxy": 15}[kind]
+        if prior_bans > 0:
+            severity += 25          # a returning banned device behind a VPN
+        signals.append(Signal(
+            "network.anonymised", severity, OBSERVED,
+            {"kind": kind, "provider": network.provider,
+             "country": network.country, "risk": network.risk,
+             "source": network.source}))
+
+    return signals
+
+
+def evaluate_modules(report, cfg):
+    """
+    Assemblies the client says it loaded, checked against an allowlist.
+
+    REPORTED tier on purpose. A repacked APK is caught by Meta's signed
+    app_integrity_state and package_cert_sha256_digest instead - those cannot be
+    faked, and they are what actually stops an injected library. This check only
+    adds colour for a moderator and catches the careless.
+    """
+    signals = []
+    modules = (report or {}).get("modules") or []
+    if not isinstance(modules, list):
+        return signals
+
+    allow = [a.lower() for a in cfg.MODULE_ALLOWLIST]
+    unknown = []
+    for m in modules[:200]:
+        name = str(m)
+        if not any(a in name.lower() for a in allow):
+            unknown.append(name)
+
+    if unknown:
+        signals.append(Signal(
+            "client.unrecognised_modules", min(30, 5 * len(unknown)), REPORTED,
+            {"modules": unknown[:25], "count": len(unknown)}))
+    return signals
+
+
 def evaluate_client_report(report):
     """
     Client self-reported environment signals. REPORTED confidence throughout,

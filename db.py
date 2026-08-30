@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS enforcements (
     id              __SERIAL__,
     playfab_id      TEXT,
     ip              TEXT,
+    device_id       TEXT,
     action          TEXT NOT NULL,
     duration_hours  BIGINT,
     reason          TEXT,
@@ -108,6 +109,13 @@ CREATE TABLE IF NOT EXISTS enforcements (
 );
 CREATE INDEX IF NOT EXISTS idx_enforcements_player ON enforcements(playfab_id);
 CREATE INDEX IF NOT EXISTS idx_enforcements_ip ON enforcements(ip);
+CREATE INDEX IF NOT EXISTS idx_enforcements_device ON enforcements(device_id);
+
+CREATE TABLE IF NOT EXISTS ip_intel (
+    ip              TEXT PRIMARY KEY,
+    verdict_json    TEXT NOT NULL,
+    checked_at      BIGINT NOT NULL
+);
 """.replace("__SERIAL__", _SERIAL)
 
 
@@ -359,7 +367,8 @@ def prune_detections(days=None, keep_states=("confirmed", "actioned")):
 def storage_stats():
     with tx() as conn:
         out = {}
-        for table in ("challenges", "sessions", "detections", "enforcements"):
+        for table in ("challenges", "sessions", "detections",
+                      "enforcements", "ip_intel"):
             row = _exec(conn, "SELECT COUNT(*) AS n FROM %s" % table).fetchone()
             out[table] = row["n"]
         return out
@@ -367,13 +376,13 @@ def storage_stats():
 
 # --- enforcement ----------------------------------------------------------
 
-def record_enforcement(action, playfab_id=None, ip=None, duration_hours=None,
-                       reason=None, automatic=True, detection_ids=None,
-                       result=None):
-    sql = ("INSERT INTO enforcements (playfab_id, ip, action, duration_hours,"
-           " reason, automatic, detection_ids, created_at, result_json)"
-           " VALUES (?,?,?,?,?,?,?,?,?)")
-    args = (playfab_id, ip, action, duration_hours, reason,
+def record_enforcement(action, playfab_id=None, ip=None, device_id=None,
+                       duration_hours=None, reason=None, automatic=True,
+                       detection_ids=None, result=None):
+    sql = ("INSERT INTO enforcements (playfab_id, ip, device_id, action,"
+           " duration_hours, reason, automatic, detection_ids, created_at,"
+           " result_json) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    args = (playfab_id, ip, device_id, action, duration_hours, reason,
             1 if automatic else 0, json.dumps(detection_ids or []), now(),
             json.dumps(result or {}))
     with tx() as conn:
@@ -392,6 +401,66 @@ def distinct_banned_accounts_for_ip(ip):
                     " WHERE ip=? AND action LIKE 'ban_account%'"
                     " AND playfab_id IS NOT NULL", (ip,)).fetchone()
     return (row["n"] if row else 0) or 0
+
+
+def prior_bans_for_device(device_id):
+    """
+    Meta signs device_state.unique_id, so this survives a new account, a new
+    Meta login and a new IP address. It is the only evasion signal in the
+    system a VPN cannot defeat.
+
+    Returns (ban_count, distinct_accounts).
+    """
+    if not device_id:
+        return (0, 0)
+    with tx() as conn:
+        row = _exec(conn,
+                    "SELECT COUNT(*) AS n, COUNT(DISTINCT playfab_id) AS accts"
+                    " FROM enforcements WHERE device_id=?"
+                    " AND action LIKE 'ban_%'", (device_id,)).fetchone()
+    if not row:
+        return (0, 0)
+    return (row["n"] or 0, row["accts"] or 0)
+
+
+def accounts_seen_on_device(device_id, exclude_playfab_id=None):
+    """Distinct accounts that have ever attested from this physical device."""
+    if not device_id:
+        return []
+    q = "SELECT DISTINCT playfab_id FROM sessions WHERE device_id=?"
+    args = [device_id]
+    if exclude_playfab_id:
+        q += " AND playfab_id<>?"
+        args.append(exclude_playfab_id)
+    with tx() as conn:
+        return [r["playfab_id"] for r in _exec(conn, q, args).fetchall()]
+
+
+# --- ip reputation cache --------------------------------------------------
+
+def get_ip_intel(ip, max_age_seconds):
+    with tx() as conn:
+        row = _exec(conn, "SELECT verdict_json, checked_at FROM ip_intel"
+                          " WHERE ip=?", (ip,)).fetchone()
+    if not row:
+        return None
+    if now() - row["checked_at"] > max_age_seconds:
+        return None
+    return row["verdict_json"]
+
+
+def store_ip_intel(ip, verdict_json):
+    with tx() as conn:
+        if IS_POSTGRES:
+            _exec(conn, "INSERT INTO ip_intel (ip, verdict_json, checked_at)"
+                        " VALUES (?,?,?) ON CONFLICT (ip) DO UPDATE SET"
+                        " verdict_json=EXCLUDED.verdict_json,"
+                        " checked_at=EXCLUDED.checked_at",
+                  (ip, verdict_json, now()))
+        else:
+            _exec(conn, "INSERT OR REPLACE INTO ip_intel"
+                        " (ip, verdict_json, checked_at) VALUES (?,?,?)",
+                  (ip, verdict_json, now()))
 
 
 def ip_already_banned(ip):

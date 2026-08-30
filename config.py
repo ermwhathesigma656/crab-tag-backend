@@ -83,8 +83,34 @@ class Config:
     THRESHOLD_SUSPECT = _int("AC_THRESHOLD_SUSPECT", 50)
     THRESHOLD_BLOCK = _int("AC_THRESHOLD_BLOCK", 100)
 
-    # Repeat-offender escalation (matches the ban policy discussed for CloudScript).
+    # Repeat-offender escalation.
     IP_BAN_AFTER_DISTINCT_ACCOUNTS = _int("AC_IP_BAN_AFTER", 3)
+
+    # Permanently IP-ban on a SIGNED attestation failure (repacked APK, wrong
+    # signing cert, failed device integrity). Only ever fires on Meta-signed
+    # evidence - never on anything the client merely claimed.
+    # PlayFab's own note on the field: "May affect multiple players."
+    IP_BAN_ON_ATTESTATION_FAILURE = _bool("AC_IP_BAN_ON_ATTESTATION_FAILURE", False)
+
+    # A device that has been banned before, arriving on a fresh account, is ban
+    # evasion. device_unique_id is signed by Meta, so a VPN does not hide it.
+    DEVICE_EVASION_ENABLED = _bool("AC_DEVICE_EVASION", True)
+
+    # --- network reputation ----------------------------------------------
+    NETCHECK_ENABLED = _bool("AC_NETCHECK", False)
+    NETCHECK_PROVIDER = os.environ.get("AC_NETCHECK_PROVIDER", "proxycheck")
+    PROXYCHECK_API_KEY = os.environ.get("AC_PROXYCHECK_KEY", "")
+    VPNAPI_KEY = os.environ.get("AC_VPNAPI_KEY", "")
+    IP_INTEL_TTL_SECONDS = _int("AC_IP_INTEL_TTL", 86400)
+
+    # Allowlisted assemblies. Anything the client reports outside this list is a
+    # signal, never a verdict - a modified client simply reports a clean list.
+    # GorillaShirts and Harmony load in the legitimate build, so they belong here.
+    MODULE_ALLOWLIST = _list("AC_MODULE_ALLOWLIST") or [
+        "GorillaShirts", "0Harmony", "HarmonyLib", "BepInEx",
+        "Assembly-CSharp", "Assembly-CSharp-firstpass", "UnityEngine",
+        "Photon", "PlayFab", "Oculus", "Unity", "Mono", "System", "netstandard",
+    ]
 
     # Retention. Free Postgres tiers are small and `detections` only grows.
     DETECTION_RETENTION_DAYS = _int("AC_DETECTION_RETENTION_DAYS", 30)
