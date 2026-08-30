@@ -16,6 +16,7 @@ picture through /admin and Discord.
 """
 import functools
 import time
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from flask import Flask, g, jsonify, request
 
@@ -28,6 +29,61 @@ from config import config
 
 
 _MIGRATED = False
+
+
+_FUNCTION_PATH = "/api/index"
+_PATH_PARAM = "__original_path"
+
+
+def _sanitise_path(value):
+    """Path only: no scheme, no host, no query, always rooted."""
+    if not value:
+        return None
+    path = urlsplit(unquote(value)).path
+    if not path:
+        return None
+    if not path.startswith("/"):
+        path = "/" + path
+    if path.rstrip("/") == _FUNCTION_PATH:
+        return None
+    return path
+
+
+class RestoreOriginalPath(object):
+    """
+    Serverless platforms rewrite the request path to the function's own path, so
+    the WSGI app sees /api/index for every URL and Flask matches nothing.
+
+    vercel.json passes the caller's path as a query parameter; this puts it back
+    before routing and strips the parameter so handlers see only the caller's
+    own query string.
+
+    Trusting a client-supplied path here is not a privilege escalation: it only
+    selects which route runs, and every protected route still checks its key.
+    """
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        current = environ.get("PATH_INFO", "")
+
+        if current.rstrip("/") == _FUNCTION_PATH or current in ("", "/"):
+            restored, remaining = None, []
+            for key, value in parse_qsl(environ.get("QUERY_STRING", ""),
+                                        keep_blank_values=True):
+                if key == _PATH_PARAM and restored is None:
+                    restored = _sanitise_path(value)
+                else:
+                    remaining.append((key, value))
+            if restored:
+                environ["PATH_INFO"] = restored
+                environ["QUERY_STRING"] = urlencode(remaining)
+
+        elif current.startswith(_FUNCTION_PATH + "/"):
+            environ["PATH_INFO"] = current[len(_FUNCTION_PATH):]
+
+        return self.wsgi_app(environ, start_response)
 
 
 def create_app():
@@ -45,6 +101,7 @@ def create_app():
     app.config["AC_MISCONFIGURED"] = bool(missing)
 
     register_routes(app)
+    app.wsgi_app = RestoreOriginalPath(app.wsgi_app)
     return app
 
 
@@ -138,6 +195,7 @@ def register_routes(app):
         return jsonify({
             "error": "not found",
             "path_seen": request.path,
+            "path_middleware": type(app.wsgi_app).__name__,
             "known_routes": sorted(
                 r.rule for r in app.url_map.iter_rules()
                 if r.endpoint != "static"),
