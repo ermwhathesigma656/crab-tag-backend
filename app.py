@@ -141,11 +141,15 @@ def register_routes(app):
             "known_routes": sorted(
                 r.rule for r in app.url_map.iter_rules()
                 if r.endpoint != "static"),
-            "routing_hints": {
-                k: v for k, v in request.headers.items()
+            # Header NAMES only. Values are deliberately withheld: the
+            # platform's own headers carry credentials (Vercel sends an OIDC
+            # token and a proxy signature on every request), and a 404 body is
+            # readable by anyone.
+            "routing_header_names": sorted(
+                k for k in request.headers.keys()
                 if "vercel" in k.lower() or "original" in k.lower()
-                or "rewrite" in k.lower() or "forwarded-uri" in k.lower()
-            },
+                or "rewrite" in k.lower() or "forwarded" in k.lower()
+            ),
         }), 404
 
     @app.get("/health")

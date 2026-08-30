@@ -1,43 +1,44 @@
 """
 Vercel serverless entry point.
 
-vercel.json rewrites every request to /api/index, which means Vercel hands the
-WSGI app the *rewritten* path rather than the one the caller asked for. Flask
-then matches nothing and 404s on every route.
+vercel.json rewrites every request to /api/index, and Vercel hands the WSGI app
+that rewritten path with no header carrying the original - verified empirically:
+a 404 diagnostic showed PATH_INFO as "/api/index" and none of
+x-vercel-original-pathname, x-forwarded-uri or x-rewrite-url present.
 
-RestoreOriginalPath puts the caller's path back before Flask routes on it. It
-reads the candidates Vercel is known to expose, falls back to stripping the
-/api/index prefix, and leaves the request untouched if none apply - so if the
-platform ever starts passing the real path through, this becomes a no-op rather
-than a second bug.
+So the rewrite passes the caller's path explicitly:
+
+    "destination": "/api/index?__original_path=/$1"
+
+and this middleware moves it back into PATH_INFO before Flask routes on it,
+then strips the parameter so handlers never see it.
+
+Trusting a client-supplied path here is not a privilege escalation: it only
+selects which route runs, and every protected route still checks its own key.
+Requesting /api/index?__original_path=/admin/stats is exactly as authorised as
+requesting /admin/stats.
 """
 import os
 import sys
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app as flask_app  # noqa: E402
 
 _FUNCTION_PATH = "/api/index"
-
-# Checked in order; the first that yields a usable path wins.
-_ORIGINAL_PATH_HEADERS = (
-    "HTTP_X_VERCEL_ORIGINAL_PATHNAME",
-    "HTTP_X_VERCEL_ORIGINAL_PATH",
-    "HTTP_X_ORIGINAL_PATH",
-    "HTTP_X_FORWARDED_URI",
-    "HTTP_X_REWRITE_URL",
-)
+_PATH_PARAM = "__original_path"
 
 
-def _clean(value):
+def _sanitise(value):
+    """Path only: no scheme, no host, no query, always rooted."""
     if not value:
         return None
-    path = urlsplit(unquote(value)).path or value
+    path = urlsplit(unquote(value)).path
+    if not path:
+        return None
     if not path.startswith("/"):
         path = "/" + path
-    # A header echoing the function path tells us nothing.
     if path.rstrip("/") == _FUNCTION_PATH:
         return None
     return path
@@ -51,14 +52,22 @@ class RestoreOriginalPath(object):
         current = environ.get("PATH_INFO", "")
 
         if current.rstrip("/") == _FUNCTION_PATH or current in ("", "/"):
-            for key in _ORIGINAL_PATH_HEADERS:
-                restored = _clean(environ.get(key))
-                if restored:
-                    environ["PATH_INFO"] = restored
-                    break
+            pairs = parse_qsl(environ.get("QUERY_STRING", ""),
+                              keep_blank_values=True)
+            restored = None
+            remaining = []
+            for key, value in pairs:
+                if key == _PATH_PARAM and restored is None:
+                    restored = _sanitise(value)
+                else:
+                    remaining.append((key, value))
+            if restored:
+                environ["PATH_INFO"] = restored
+                # Handlers should see the caller's query string, not ours.
+                environ["QUERY_STRING"] = urlencode(remaining)
 
-        # Vercel serves the function at /api/index; anything nested under that
-        # is the real path with the function prefix glued on the front.
+        # Direct hits on the function path keep working if the rewrite is ever
+        # removed: /api/index/health -> /health
         elif current.startswith(_FUNCTION_PATH + "/"):
             environ["PATH_INFO"] = current[len(_FUNCTION_PATH):]
 
