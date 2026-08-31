@@ -116,6 +116,16 @@ CREATE TABLE IF NOT EXISTS ip_intel (
     verdict_json    TEXT NOT NULL,
     checked_at      BIGINT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS login_ips (
+    playfab_id      TEXT NOT NULL,
+    ip              TEXT NOT NULL,
+    first_seen_at   BIGINT NOT NULL,
+    last_seen_at    BIGINT NOT NULL,
+    hits            BIGINT NOT NULL DEFAULT 1,
+    PRIMARY KEY (playfab_id, ip)
+);
+CREATE INDEX IF NOT EXISTS idx_login_ips_ip ON login_ips(ip);
 """.replace("__SERIAL__", _SERIAL)
 
 
@@ -515,6 +525,54 @@ def store_ip_intel(ip, verdict_json):
             _exec(conn, "INSERT OR REPLACE INTO ip_intel"
                         " (ip, verdict_json, checked_at) VALUES (?,?,?)",
                   (ip, verdict_json, now()))
+
+
+def record_login_ip(playfab_id, ip):
+    """
+    The address a player actually logged in from.
+
+    This is the only place we ever see it. Attestation arrives relayed through
+    PlayFab CloudScript, so its source address is PlayFab's egress, not the
+    player's - banning that would ban everyone. Enforcement that needs a real
+    IP reads it from here.
+    """
+    if not (playfab_id and ip):
+        return
+    ts = now()
+    with tx() as conn:
+        if IS_POSTGRES:
+            _exec(conn, "INSERT INTO login_ips"
+                        " (playfab_id, ip, first_seen_at, last_seen_at, hits)"
+                        " VALUES (?,?,?,?,1)"
+                        " ON CONFLICT (playfab_id, ip) DO UPDATE SET"
+                        " last_seen_at=EXCLUDED.last_seen_at,"
+                        " hits=login_ips.hits+1",
+                  (playfab_id, ip, ts, ts))
+        else:
+            _exec(conn, "INSERT INTO login_ips"
+                        " (playfab_id, ip, first_seen_at, last_seen_at, hits)"
+                        " VALUES (?,?,?,?,1)"
+                        " ON CONFLICT (playfab_id, ip) DO UPDATE SET"
+                        " last_seen_at=excluded.last_seen_at,"
+                        " hits=login_ips.hits+1",
+                  (playfab_id, ip, ts, ts))
+
+
+def last_login_ip(playfab_id):
+    """Most recent address for a player, or None if they never logged in here."""
+    with tx() as conn:
+        row = _exec(conn, "SELECT ip FROM login_ips WHERE playfab_id=?"
+                          " ORDER BY last_seen_at DESC LIMIT 1",
+                    (playfab_id,)).fetchone()
+    return row["ip"] if row else None
+
+
+def accounts_from_ip(ip):
+    """How many distinct accounts have logged in from one address."""
+    with tx() as conn:
+        row = _exec(conn, "SELECT COUNT(*) AS n FROM login_ips WHERE ip=?",
+                    (ip,)).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def ip_already_banned(ip):

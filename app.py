@@ -24,6 +24,7 @@ import attestation
 import db
 import netcheck
 import routing
+import serverauth
 import sessions
 import trust
 from config import config
@@ -231,6 +232,38 @@ def register_routes(app):
             "enforcing": config.ENFORCE,
             "time": int(time.time()),
         })
+
+    # ------------------------------------------------------------------
+    # 0. Login. The only unauthenticated endpoint, and deliberately so: it is
+    #    what the client calls INSTEAD of Client/LoginWithCustomID. It is not
+    #    open in any meaningful sense - reaching a session ticket requires a
+    #    nonce Meta signed for that exact Oculus account, which is precisely
+    #    what an account spammer cannot produce.
+    #
+    #    This is also the first point where the real player IP is visible.
+    #    Attestation reaches us relayed through PlayFab CloudScript, so the
+    #    address on that request is PlayFab's, not the player's; here the
+    #    client connects directly.
+    # ------------------------------------------------------------------
+    @app.post("/v1/auth/login")
+    @degrade_on_db_failure
+    def auth_login():
+        body = _json()
+        payload, status = serverauth.login(
+            body.get("meta_user_id"),
+            body.get("nonce"),
+            body.get("integrity_token"),
+        )
+
+        ip = _client_ip()
+        if status == 200 and payload.get("playfab_id"):
+            try:
+                db.record_login_ip(payload["playfab_id"], ip)
+            except Exception as exc:            # never fail a good login on bookkeeping
+                app.logger.warning("record_login_ip failed: %s", exc)
+            # Claims are for our records, not the client's.
+            payload.pop("claims", None)
+        return jsonify(payload), status
 
     # ------------------------------------------------------------------
     # 1. Challenge. Called by CloudScript on the player's behalf so the

@@ -57,6 +57,12 @@ class Config:
             return ""
         return "OC|%s|%s" % (self.META_APP_ID, self.META_APP_SECRET)
 
+    # Login is the one gate that fails CLOSED: if Meta cannot confirm who the
+    # caller is, no session ticket is issued. Flip this only to keep the game
+    # playable through a Meta outage, and understand it re-opens account spam
+    # for as long as it is on.
+    LOGIN_DEGRADE_OPEN = _bool("AC_LOGIN_DEGRADE_OPEN", False)
+
     # --- PlayFab (enforcement) -------------------------------------------
     PLAYFAB_TITLE_ID = os.environ.get("AC_PLAYFAB_TITLE_ID", "")
     PLAYFAB_SECRET_KEY = os.environ.get("AC_PLAYFAB_SECRET_KEY", "")
