@@ -263,6 +263,10 @@ def register_routes(app):
                 app.logger.warning("record_login_ip failed: %s", exc)
             # Claims are for our records, not the client's.
             payload.pop("claims", None)
+            # Connection settings travel with the login response: the caller has
+            # just proven a Meta identity, and it needs these before it can talk
+            # to PlayFab or Photon at all.
+            payload["client_config"] = config.client_config
         return jsonify(payload), status
 
     # ------------------------------------------------------------------

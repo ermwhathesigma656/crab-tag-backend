@@ -67,6 +67,34 @@ class Config:
     PLAYFAB_TITLE_ID = os.environ.get("AC_PLAYFAB_TITLE_ID", "")
     PLAYFAB_SECRET_KEY = os.environ.get("AC_PLAYFAB_SECRET_KEY", "")
 
+    # --- client connection settings ---------------------------------------
+    # Handed to the game after it proves its Meta identity, so the title id and
+    # Photon app ids are not sitting in the APK for anyone to grep out. These
+    # are NOT secrets - the client transmits them on every connection - but
+    # keeping them here means they can be rotated without a rebuild and are not
+    # handed to callers who never proved who they are.
+    #
+    # No defaults on purpose: this repository is public, and a default would put
+    # the real values somewhere far easier to read than the APK.
+    CLIENT_PLAYFAB_TITLE_ID = os.environ.get("AC_CLIENT_TITLE_ID", "")
+    PHOTON_APP_ID_REALTIME = os.environ.get("AC_PHOTON_REALTIME", "")
+    PHOTON_APP_ID_VOICE = os.environ.get("AC_PHOTON_VOICE", "")
+    PHOTON_APP_VERSION = os.environ.get("AC_PHOTON_VERSION", "")
+    PHOTON_FIXED_REGION = os.environ.get("AC_PHOTON_REGION", "")
+
+    @property
+    def client_config(self):
+        """Only non-empty values, so a half-configured backend cannot blank out
+        a setting the client already had working."""
+        pairs = (
+            ("playfab_title_id", self.CLIENT_PLAYFAB_TITLE_ID or self.PLAYFAB_TITLE_ID),
+            ("photon_realtime", self.PHOTON_APP_ID_REALTIME),
+            ("photon_voice", self.PHOTON_APP_ID_VOICE),
+            ("photon_version", self.PHOTON_APP_VERSION),
+            ("photon_region", self.PHOTON_FIXED_REGION),
+        )
+        return dict((k, v) for k, v in pairs if v)
+
     # --- detection routing ------------------------------------------------
     DISCORD_WEBHOOK_SECURITY = os.environ.get("AC_DISCORD_SECURITY", "")
     DISCORD_WEBHOOK_MODERATION = os.environ.get("AC_DISCORD_MODERATION", "")
