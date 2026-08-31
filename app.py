@@ -230,6 +230,10 @@ def register_routes(app):
             "storage": "postgres" if db.IS_POSTGRES else "sqlite",
             "storage_ok": storage_ok,
             "enforcing": config.ENFORCE,
+            # Key NAMES only, never values: enough to tell a configured backend
+            # from one that will hand the game an empty config and strand it at
+            # the login screen, without publishing anything.
+            "client_config_keys": sorted(config.client_config.keys()),
             "time": int(time.time()),
         })
 
