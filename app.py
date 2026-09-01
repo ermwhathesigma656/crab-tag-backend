@@ -286,14 +286,45 @@ def register_routes(app):
     @degrade_on_db_failure
     def get_text(key):
         key = key.strip()[:128]
-        value = db.get_text(key)
-        if value is None and "_" in key:
-            base, _, suffix = key.rpartition("_")
-            if base and all(c.isdigit() or c == "." for c in suffix):
-                value = db.get_text(base)
+        try:
+            value = db.get_text(key)
+            if value is None and "_" in key:
+                base, _, suffix = key.rpartition("_")
+                if base and all(c.isdigit() or c == "." for c in suffix):
+                    value = db.get_text(base)
+        except Exception as exc:
+            # A board with no text is a cosmetic problem; a 500 here is not.
+            # degrade_on_db_failure only catches DatabaseUnavailable, so a
+            # schema fault (missing table after a deploy) would otherwise reach
+            # the client as an opaque 500 with nothing to act on.
+            app.logger.exception("get_text(%s) failed", key)
+            return jsonify({
+                "error": "text unavailable",
+                "kind": type(exc).__name__,
+                "detail": str(exc)[:200],
+            }), 503
         if value is None:
             return jsonify({"error": "not found", "key": key}), 404
         return jsonify({"key": key, "value": value})
+
+    @app.get("/v1/text-diag")
+    @degrade_on_db_failure
+    def text_diag():
+        """Which tables exist. No values, no secrets - just enough to tell a
+        missing migration from an empty table."""
+        try:
+            with db.tx() as conn:
+                if db.IS_POSTGRES:
+                    rows = db._exec(conn, "SELECT table_name AS n FROM information_schema.tables"
+                                          " WHERE table_schema='public' ORDER BY table_name").fetchall()
+                else:
+                    rows = db._exec(conn, "SELECT name AS n FROM sqlite_master"
+                                          " WHERE type='table' ORDER BY name").fetchall()
+            return jsonify({"backend": "postgres" if db.IS_POSTGRES else "sqlite",
+                            "tables": [r["n"] for r in rows],
+                            "auto_migrate": config.AUTO_MIGRATE})
+        except Exception as exc:
+            return jsonify({"kind": type(exc).__name__, "detail": str(exc)[:200]}), 503
 
     @app.post("/v1/admin/text")
     @degrade_on_db_failure
