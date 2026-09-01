@@ -235,6 +235,10 @@ def register_routes(app):
             # the login screen, without publishing anything.
             "client_config_keys": sorted(config.client_config.keys()),
             "admin_key_len": len(config.ADMIN_API_KEY or ""),
+            "webhooks_set": {
+                "security": bool(config.DISCORD_WEBHOOK_SECURITY),
+                "moderation": bool(config.DISCORD_WEBHOOK_MODERATION),
+            },
             "time": int(time.time()),
         })
 
