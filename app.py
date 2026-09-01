@@ -234,6 +234,7 @@ def register_routes(app):
             # from one that will hand the game an empty config and strand it at
             # the login screen, without publishing anything.
             "client_config_keys": sorted(config.client_config.keys()),
+            "admin_key_len": len(config.ADMIN_API_KEY or ""),
             "time": int(time.time()),
         })
 
