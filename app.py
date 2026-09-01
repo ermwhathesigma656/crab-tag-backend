@@ -274,6 +274,46 @@ def register_routes(app):
         return jsonify(payload), status
 
     # ------------------------------------------------------------------
+    # In-game display text (MOTD, store signs). Public on purpose: this is
+    # text shown on a wall to every player, and gating it behind a session
+    # would only mean the boards stay blank until login finishes.
+    #
+    # The client appends the app version to the key, so MOTD becomes
+    # MOTD_1.1.43. We fall back to the unversioned key so a new build does not
+    # blank every sign until someone re-enters them.
+    # ------------------------------------------------------------------
+    @app.get("/v1/text/<path:key>")
+    @degrade_on_db_failure
+    def get_text(key):
+        key = key.strip()[:128]
+        value = db.get_text(key)
+        if value is None and "_" in key:
+            base, _, suffix = key.rpartition("_")
+            if base and all(c.isdigit() or c == "." for c in suffix):
+                value = db.get_text(base)
+        if value is None:
+            return jsonify({"error": "not found", "key": key}), 404
+        return jsonify({"key": key, "value": value})
+
+    @app.post("/v1/admin/text")
+    @degrade_on_db_failure
+    @require_admin_key
+    def set_text():
+        body = _json()
+        key = (body.get("key") or "").strip()
+        value = body.get("value")
+        if not key or value is None:
+            return jsonify({"error": "key and value required"}), 400
+        db.set_text(key[:128], str(value))
+        return jsonify({"ok": True, "key": key})
+
+    @app.get("/v1/admin/text")
+    @degrade_on_db_failure
+    @require_admin_key
+    def list_texts():
+        return jsonify({"texts": db.list_texts()})
+
+    # ------------------------------------------------------------------
     # 1. Challenge. Called by CloudScript on the player's behalf so the
     #    nonce is bound to a PlayFab identity the client cannot choose.
     # ------------------------------------------------------------------

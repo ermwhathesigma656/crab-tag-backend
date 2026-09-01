@@ -117,6 +117,12 @@ CREATE TABLE IF NOT EXISTS ip_intel (
     checked_at      BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS texts (
+    key             TEXT PRIMARY KEY,
+    value           TEXT NOT NULL,
+    updated_at      BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS login_ips (
     playfab_id      TEXT NOT NULL,
     ip              TEXT NOT NULL,
@@ -525,6 +531,31 @@ def store_ip_intel(ip, verdict_json):
             _exec(conn, "INSERT OR REPLACE INTO ip_intel"
                         " (ip, verdict_json, checked_at) VALUES (?,?,?)",
                   (ip, verdict_json, now()))
+
+
+def get_text(key):
+    """In-game display text. Returns None when the key was never set."""
+    with tx() as conn:
+        row = _exec(conn, "SELECT value FROM texts WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_text(key, value):
+    ts = now()
+    with tx() as conn:
+        if IS_POSTGRES:
+            _exec(conn, "INSERT INTO texts (key, value, updated_at) VALUES (?,?,?)"
+                        " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value,"
+                        " updated_at=EXCLUDED.updated_at", (key, value, ts))
+        else:
+            _exec(conn, "INSERT OR REPLACE INTO texts (key, value, updated_at)"
+                        " VALUES (?,?,?)", (key, value, ts))
+
+
+def list_texts():
+    with tx() as conn:
+        rows = _exec(conn, "SELECT key, updated_at FROM texts ORDER BY key").fetchall()
+    return [{"key": r["key"], "updated_at": r["updated_at"]} for r in rows]
 
 
 def record_login_ip(playfab_id, ip):
