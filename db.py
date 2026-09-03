@@ -475,8 +475,8 @@ def distinct_banned_accounts_for_ip(ip):
     with tx() as conn:
         row = _exec(conn,
                     "SELECT COUNT(DISTINCT playfab_id) AS n FROM enforcements"
-                    " WHERE ip=? AND action LIKE 'ban_account%'"
-                    " AND playfab_id IS NOT NULL", (ip,)).fetchone()
+                    " WHERE ip=? AND action LIKE ?"
+                    " AND playfab_id IS NOT NULL", (ip, 'ban_account%')).fetchone()
     return (row["n"] if row else 0) or 0
 
 
@@ -494,7 +494,7 @@ def prior_bans_for_device(device_id):
         row = _exec(conn,
                     "SELECT COUNT(*) AS n, COUNT(DISTINCT playfab_id) AS accts"
                     " FROM enforcements WHERE device_id=?"
-                    " AND action LIKE 'ban_%'", (device_id,)).fetchone()
+                    " AND action LIKE ?", (device_id, 'ban_%')).fetchone()
     if not row:
         return (0, 0)
     return (row["n"] or 0, row["accts"] or 0)
@@ -650,7 +650,7 @@ def banned_meta_ids():
     with tx() as conn:
         rows = _exec(conn, "SELECT DISTINCT o.meta_user_id AS m FROM device_owners o"
                            " JOIN enforcements e ON e.device_id = o.device_id"
-                           " WHERE e.action LIKE 'ban_%'").fetchall()
+                           " WHERE e.action LIKE ?", ('ban_%',)).fetchall()
     return set(r["m"] for r in rows if r["m"])
 
 
@@ -660,8 +660,8 @@ def meta_id_banned(meta_user_id):
     with tx() as conn:
         row = _exec(conn, "SELECT 1 AS x FROM device_owners o"
                           " JOIN enforcements e ON e.device_id = o.device_id"
-                          " WHERE o.meta_user_id=? AND e.action LIKE 'ban_%' LIMIT 1",
-                    (str(meta_user_id),)).fetchone()
+                          " WHERE o.meta_user_id=? AND e.action LIKE ? LIMIT 1",
+                    (str(meta_user_id), 'ban_%')).fetchone()
     return row is not None
 
 
@@ -675,10 +675,10 @@ def clear_bans(ip=None, device_id=None, playfab_id=None):
         where.append("playfab_id=?"); args.append(playfab_id)
     if not where:
         return 0
-    sql = ("DELETE FROM enforcements WHERE action LIKE 'ban_%' AND ("
+    sql = ("DELETE FROM enforcements WHERE action LIKE ? AND ("
            + " OR ".join(where) + ")")
     with tx() as conn:
-        cur = _exec(conn, sql, tuple(args))
+        cur = _exec(conn, sql, tuple(['ban_%'] + args))
         return cur.rowcount or 0
 
 
