@@ -97,6 +97,19 @@ class Config:
 
     # --- detection routing ------------------------------------------------
     DISCORD_WEBHOOK_SECURITY = os.environ.get("AC_DISCORD_SECURITY", "")
+
+    ALLOWED_MODULES = [
+        m.strip().lower()
+        for m in os.environ.get("AC_ALLOWED_MODULES", ",".join([
+            "libAudioPluginOculusSpatializer.so", "libInteractionSdk.so",
+            "libOVRLipSync.so", "libOVRPlugin.so", "libOculusXRPlugin.so",
+            "libSDKTelemetry.so", "lib_burst_generated.so", "libil2cpp.so",
+            "libloaderimpl.so", "libmain.so", "libopenxr_loader.so",
+            "libopus_egpv.so", "libovrmetricstool_client_api.so",
+            "libovrplatformloader.so", "libunity.so", "libwebrtc-audio.so",
+        ])).split(",")
+        if m.strip()
+    ]
     DISCORD_WEBHOOK_MODERATION = os.environ.get("AC_DISCORD_MODERATION", "")
 
     # --- policy -----------------------------------------------------------

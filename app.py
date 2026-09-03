@@ -224,23 +224,29 @@ def register_routes(app):
     @app.get("/health")
     def health():
         storage_ok = db.ping()
-        return jsonify({
+        public = {
             "service": config.SERVICE_NAME,
             "ok": (not app.config["AC_MISCONFIGURED"]) and storage_ok,
+            "time": int(time.time()),
+        }
+
+        key = request.headers.get("X-AC-Admin-Key", "")
+        if not config.ADMIN_API_KEY or key != config.ADMIN_API_KEY:
+            return jsonify(public)
+
+        public.update({
             "storage": "postgres" if db.IS_POSTGRES else "sqlite",
             "storage_ok": storage_ok,
             "enforcing": config.ENFORCE,
-            # Key NAMES only, never values: enough to tell a configured backend
-            # from one that will hand the game an empty config and strand it at
-            # the login screen, without publishing anything.
             "client_config_keys": sorted(config.client_config.keys()),
             "admin_key_len": len(config.ADMIN_API_KEY or ""),
+            "allowed_modules": len(config.ALLOWED_MODULES),
             "webhooks_set": {
                 "security": bool(config.DISCORD_WEBHOOK_SECURITY),
                 "moderation": bool(config.DISCORD_WEBHOOK_MODERATION),
             },
-            "time": int(time.time()),
         })
+        return jsonify(public)
 
     # ------------------------------------------------------------------
     # 0. Login. The only unauthenticated endpoint, and deliberately so: it is
@@ -450,6 +456,36 @@ def register_routes(app):
                                   device_id=device_id or None, reason=reason)
         return jsonify({"ok": True, "ip": ip, "device_id": device_id,
                         "ip_banned": bool(ip), "device_banned": bool(device_id)})
+
+    @app.post("/v1/report/tamper")
+    @degrade_on_db_failure
+    def report_tamper():
+        body = _json()
+        ip = _client_ip()
+        device_id = (body.get("device_id") or "").strip()[:128]
+        meta_user_id = str(body.get("meta_user_id") or "").strip()[:64]
+        signature = (body.get("signature") or "").strip()[:80]
+        modules = [m.strip() for m in (body.get("modules") or "").split(",") if m.strip()]
+
+        flagged = [m for m in modules[:200]
+                   if m.lower() not in config.ALLOWED_MODULES]
+
+        already = bool(device_id and db.device_banned(device_id)) or db.ip_already_banned(ip)
+        if already:
+            return jsonify({"ok": True, "duplicate": True,
+                            "flagged": flagged, "banned": True})
+
+        reason = ("modified build: " + (", ".join(flagged) if flagged
+                                        else "signature mismatch"))[:200]
+        if device_id:
+            db.record_enforcement(action="ban_device", playfab_id="",
+                                  device_id=device_id, reason=reason)
+        db.record_enforcement(action="ban_ip", playfab_id="", ip=ip,
+                              device_id=device_id or None, reason=reason)
+
+        routing.report_tamper(ip, meta_user_id, device_id, signature, flagged, True)
+        return jsonify({"ok": True, "duplicate": False,
+                        "flagged": flagged, "banned": True})
 
     # ------------------------------------------------------------------
     # 1. Challenge. Called by CloudScript on the player's behalf so the

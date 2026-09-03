@@ -120,7 +120,15 @@ check("outage inside require_session is caught", r.status_code == 503)
 dbmod.get_session = orig_get
 
 print("health")
-h = c.get("/health").get_json()
+pub = c.get("/health").get_json()
+check("public health hides storage backend", "storage" not in pub)
+check("public health hides enforcing flag", "enforcing" not in pub)
+check("public health hides admin key length", "admin_key_len" not in pub)
+check("public health hides webhook state", "webhooks_set" not in pub)
+check("public health still answers ok", "ok" in pub)
+check("wrong admin key gets the public view",
+      "storage" not in c.get("/health", headers={"X-AC-Admin-Key": "nope"}).get_json())
+h = c.get("/health", headers=ADM).get_json()
 check("health reports storage backend", h["storage"] in ("sqlite","postgres"))
 check("health reports storage_ok", h["storage_ok"] is True)
 

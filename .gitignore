@@ -6,3 +6,4 @@ __pycache__/
 .env
 tools/
 test_*.sqlite3
+_bak/

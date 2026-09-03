@@ -156,6 +156,23 @@ def report_anonymised_login(ip, meta_user_id, verdict, kind):
     )
 
 
+def report_tamper(ip, meta_user_id, device_id, signature, flagged, banned):
+    _post_webhook(
+        config.DISCORD_WEBHOOK_SECURITY, "MODIFIED BUILD BLOCKED",
+        "A client refused to start because its signing certificate did not "
+        "match the official Horizon Store build.",
+        SEVERITY_COLOURS["block"],
+        fields={
+            "Unauthorised library": ", ".join(flagged) if flagged else "none reported",
+            "Meta id": meta_user_id or "-",
+            "Device": device_id or "-",
+            "IP": ip,
+            "Signature": (signature or "-")[:32],
+            "Action": "device and ip banned" if banned else "logged only",
+        },
+    )
+
+
 def ban_ip(ip, playfab_id, reason, detection_ids=None, automatic=True,
            device_id=None):
     """
