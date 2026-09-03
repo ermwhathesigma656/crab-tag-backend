@@ -87,6 +87,38 @@ check("fresh ip logs in", r.status_code == 200)
 r = c.post("/v1/enforce/check", json={"device_id": DEVICE, "playfab_id": "VICTIM01"}, headers=SRV)
 check("device still banned across accounts and ips", r.get_json()["device_banned"] is True)
 
+print("\ndevice binds to the first Meta account that proves itself")
+r = c.post("/v1/enforce/bind", json={"device_id": "HEADSET-A", "meta_user_id": META,
+                                     "playfab_id": "VICTIM01"}, headers=SRV)
+check("first bind takes", r.get_json()["bound"] is True)
+
+r = c.post("/v1/enforce/bind", json={"device_id": "HEADSET-A", "meta_user_id": META,
+                                     "playfab_id": "VICTIM01"}, headers=SRV)
+check("same account rebinding is a no-op", r.get_json()["matches"] is True)
+
+r = c.post("/v1/enforce/bind", json={"device_id": "HEADSET-A", "meta_user_id": "77777777777777777",
+                                     "playfab_id": "OTHER"}, headers=SRV)
+j = r.get_json()
+check("different account cannot steal the binding", j["bound"] is False)
+check("binding still names the original owner", j["meta_user_id"] == META)
+check("mismatch reported", j["matches"] is False)
+
+print("\nenforce/check reports owner mismatch")
+r = c.post("/v1/enforce/check", json={"device_id": "HEADSET-A", "playfab_id": "VICTIM01",
+                                      "meta_user_id": META}, headers=SRV)
+check("original owner -> no mismatch", r.get_json()["device_owner_mismatch"] is False)
+
+r = c.post("/v1/enforce/check", json={"device_id": "HEADSET-A", "playfab_id": "OTHER",
+                                      "meta_user_id": "77777777777777777"}, headers=SRV)
+j = r.get_json()
+check("second Meta account -> mismatch", j["device_owner_mismatch"] is True)
+check("mismatch names the bound account", j["bound_meta_user_id"] == META)
+
+print("\nunbound device does not false-positive")
+r = c.post("/v1/enforce/check", json={"device_id": "NEVER-SEEN", "playfab_id": "NOBODY",
+                                      "meta_user_id": META}, headers=SRV)
+check("no binding -> no mismatch", r.get_json()["device_owner_mismatch"] is False)
+
 print("\nunrelated device is unaffected")
 r = c.post("/v1/enforce/check", json={"device_id": "aaaa1111", "playfab_id": "NOBODY"}, headers=SRV)
 check("clean device not banned", r.get_json()["device_banned"] is False)

@@ -359,12 +359,35 @@ def register_routes(app):
         body = _json()
         device_id = (body.get("device_id") or "").strip()
         playfab_id = (body.get("playfab_id") or "").strip()
+        meta_user_id = str(body.get("meta_user_id") or "").strip()
         ip = db.last_login_ip(playfab_id) if playfab_id else None
+        owner = db.device_owner(device_id)
+        mismatch = bool(owner and meta_user_id and owner["meta_user_id"] != meta_user_id)
         return jsonify({
             "device_banned": db.device_banned(device_id),
             "ip_banned": db.ip_already_banned(ip) if ip else False,
             "ip": ip or "",
+            "device_owner_mismatch": mismatch,
+            "bound_meta_user_id": owner["meta_user_id"] if owner else "",
         })
+
+    @app.post("/v1/enforce/bind")
+    @degrade_on_db_failure
+    @require_server_key
+    def enforce_bind():
+        body = _json()
+        device_id = (body.get("device_id") or "").strip()
+        meta_user_id = str(body.get("meta_user_id") or "").strip()
+        playfab_id = (body.get("playfab_id") or "").strip()
+        if not (device_id and meta_user_id):
+            return jsonify({"error": "device_id and meta_user_id required"}), 400
+        existing = db.device_owner(device_id)
+        if existing is None:
+            db.bind_device(device_id, meta_user_id, playfab_id)
+            return jsonify({"ok": True, "bound": True, "meta_user_id": meta_user_id})
+        return jsonify({"ok": True, "bound": False,
+                        "meta_user_id": existing["meta_user_id"],
+                        "matches": existing["meta_user_id"] == meta_user_id})
 
     @app.post("/v1/enforce/ban")
     @degrade_on_db_failure

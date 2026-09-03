@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS texts (
     updated_at      BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS device_owners (
+    device_id       TEXT PRIMARY KEY,
+    meta_user_id    TEXT NOT NULL,
+    playfab_id      TEXT,
+    bound_at        BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS login_ips (
     playfab_id      TEXT NOT NULL,
     ip              TEXT NOT NULL,
@@ -604,6 +611,31 @@ def accounts_from_ip(ip):
         row = _exec(conn, "SELECT COUNT(*) AS n FROM login_ips WHERE ip=?",
                     (ip,)).fetchone()
     return int(row["n"]) if row else 0
+
+
+def device_owner(device_id):
+    if not device_id:
+        return None
+    with tx() as conn:
+        row = _exec(conn, "SELECT meta_user_id, playfab_id FROM device_owners"
+                          " WHERE device_id=?", (device_id,)).fetchone()
+    return {"meta_user_id": row["meta_user_id"], "playfab_id": row["playfab_id"]} if row else None
+
+
+def bind_device(device_id, meta_user_id, playfab_id):
+    if not (device_id and meta_user_id):
+        return False
+    ts = now()
+    with tx() as conn:
+        if IS_POSTGRES:
+            _exec(conn, "INSERT INTO device_owners (device_id, meta_user_id, playfab_id, bound_at)"
+                        " VALUES (?,?,?,?) ON CONFLICT (device_id) DO NOTHING",
+                  (device_id, meta_user_id, playfab_id, ts))
+        else:
+            _exec(conn, "INSERT OR IGNORE INTO device_owners"
+                        " (device_id, meta_user_id, playfab_id, bound_at) VALUES (?,?,?,?)",
+                  (device_id, meta_user_id, playfab_id, ts))
+    return True
 
 
 def device_banned(device_id):
