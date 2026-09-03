@@ -453,6 +453,21 @@ def storage_stats():
 
 # --- enforcement ----------------------------------------------------------
 
+def recent_tamper_report(ip, device_id=None, within_seconds=900):
+    cutoff = now() - within_seconds
+    with tx() as conn:
+        if device_id:
+            row = _exec(conn, "SELECT 1 AS x FROM detections WHERE signal=?"
+                              " AND created_at >= ? AND (ip=? OR device_id=?)"
+                              " LIMIT 1",
+                        ("modified_build", cutoff, ip, device_id)).fetchone()
+        else:
+            row = _exec(conn, "SELECT 1 AS x FROM detections WHERE signal=?"
+                              " AND created_at >= ? AND ip=? LIMIT 1",
+                        ("modified_build", cutoff, ip)).fetchone()
+    return row is not None
+
+
 def record_enforcement(action, playfab_id=None, ip=None, device_id=None,
                        duration_hours=None, reason=None, automatic=True,
                        detection_ids=None, result=None):

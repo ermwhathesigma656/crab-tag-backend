@@ -470,22 +470,17 @@ def register_routes(app):
         flagged = [m for m in modules[:200]
                    if m.lower() not in config.ALLOWED_MODULES]
 
-        already = bool(device_id and db.device_banned(device_id)) or db.ip_already_banned(ip)
-        if already:
-            return jsonify({"ok": True, "duplicate": True,
-                            "flagged": flagged, "banned": True})
+        if db.recent_tamper_report(ip, device_id):
+            return jsonify({"ok": True, "duplicate": True, "flagged": flagged})
 
-        reason = ("modified build: " + (", ".join(flagged) if flagged
-                                        else "signature mismatch"))[:200]
-        if device_id:
-            db.record_enforcement(action="ban_device", playfab_id="",
-                                  device_id=device_id, reason=reason)
-        db.record_enforcement(action="ban_ip", playfab_id="", ip=ip,
-                              device_id=device_id or None, reason=reason)
-
-        routing.report_tamper(ip, meta_user_id, device_id, signature, flagged, True)
-        return jsonify({"ok": True, "duplicate": False,
-                        "flagged": flagged, "banned": True})
+        db.record_detection(
+            signal="modified_build", severity="block", confidence="reported",
+            ip=ip, detail={"flagged": flagged, "signature": signature,
+                           "device_id": device_id, "meta_user_id": meta_user_id,
+                           "modules": modules[:200]},
+        )
+        routing.report_tamper(ip, meta_user_id, device_id, signature, flagged, False)
+        return jsonify({"ok": True, "duplicate": False, "flagged": flagged})
 
     # ------------------------------------------------------------------
     # 1. Challenge. Called by CloudScript on the player's behalf so the
