@@ -119,6 +119,34 @@ r = c.post("/v1/enforce/check", json={"device_id": "NEVER-SEEN", "playfab_id": "
                                       "meta_user_id": META}, headers=SRV)
 check("no binding -> no mismatch", r.get_json()["device_owner_mismatch"] is False)
 
+print("\na banned headset owner cannot escape with a new ip")
+db.bind_device("BANNED-HEADSET", "55555555555555555", "BANNEDACC")
+db.record_enforcement(action="ban_device", playfab_id="BANNEDACC",
+                      device_id="BANNED-HEADSET", reason="libzenith.so")
+check("meta id now flagged as banned", db.meta_id_banned("55555555555555555") is True)
+check("unrelated meta id is not", db.meta_id_banned("12121212121212121") is False)
+r = c.post("/v1/auth/login", json={"meta_user_id": "55555555555555555", "nonce": "ok"},
+           headers={"X-Forwarded-For": "203.0.113.77"})
+check("banned owner refused on a brand new ip", r.status_code == 403)
+check("reason names the account", "account is banned" in r.get_data(as_text=True))
+
+print("\nvpn login blocking")
+import netcheck
+appmod.config.BLOCK_ANONYMISED_LOGIN = True
+netcheck.lookup = lambda ip, max_age_seconds=None: netcheck.NetworkVerdict(
+    ip, is_vpn=True, provider="TestVPN", country="NL", source="test", checked=True)
+r = c.post("/v1/auth/login", json={"meta_user_id": "31313131313131313", "nonce": "ok"},
+           headers={"X-Forwarded-For": "203.0.113.90"})
+check("vpn login refused", r.status_code == 403)
+check("message tells them to drop the vpn", "without a vpn" in r.get_data(as_text=True))
+
+netcheck.lookup = lambda ip, max_age_seconds=None: netcheck.NetworkVerdict(
+    ip, source="test", checked=True)
+r = c.post("/v1/auth/login", json={"meta_user_id": "31313131313131313", "nonce": "ok"},
+           headers={"X-Forwarded-For": "203.0.113.91"})
+check("clean residential ip still logs in", r.status_code == 200)
+appmod.config.BLOCK_ANONYMISED_LOGIN = False
+
 print("\nunrelated device is unaffected")
 r = c.post("/v1/enforce/check", json={"device_id": "aaaa1111", "playfab_id": "NOBODY"}, headers=SRV)
 check("clean device not banned", r.get_json()["device_banned"] is False)

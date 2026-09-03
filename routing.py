@@ -138,6 +138,24 @@ def ban_account(playfab_id, reason, hours=None, detection_ids=None,
     return result
 
 
+def report_anonymised_login(ip, meta_user_id, verdict, kind):
+    _post_webhook(
+        config.DISCORD_WEBHOOK_MODERATION, "VPN / PROXY LOGIN BLOCKED",
+        "A login was refused because the address is a %s.\n\n"
+        "A banned player changing IP does not lift a device ban: Meta signs the "
+        "headset id, so the ban follows the hardware." % kind,
+        SEVERITY_COLOURS["block"],
+        fields={
+            "Meta id": meta_user_id or "-",
+            "IP": ip,
+            "Kind": kind,
+            "Provider": verdict.provider or "-",
+            "Country": verdict.country or "-",
+            "Source": verdict.source,
+        },
+    )
+
+
 def ban_ip(ip, playfab_id, reason, detection_ids=None, automatic=True,
            device_id=None):
     """

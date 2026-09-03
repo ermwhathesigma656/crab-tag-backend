@@ -646,6 +646,25 @@ def unbind_device(device_id):
         return (cur.rowcount or 0) > 0
 
 
+def banned_meta_ids():
+    with tx() as conn:
+        rows = _exec(conn, "SELECT DISTINCT o.meta_user_id AS m FROM device_owners o"
+                           " JOIN enforcements e ON e.device_id = o.device_id"
+                           " WHERE e.action LIKE 'ban_%'").fetchall()
+    return set(r["m"] for r in rows if r["m"])
+
+
+def meta_id_banned(meta_user_id):
+    if not meta_user_id:
+        return False
+    with tx() as conn:
+        row = _exec(conn, "SELECT 1 AS x FROM device_owners o"
+                          " JOIN enforcements e ON e.device_id = o.device_id"
+                          " WHERE o.meta_user_id=? AND e.action LIKE 'ban_%' LIMIT 1",
+                    (str(meta_user_id),)).fetchone()
+    return row is not None
+
+
 def clear_bans(ip=None, device_id=None, playfab_id=None):
     where, args = [], []
     if ip:

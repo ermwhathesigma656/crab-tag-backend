@@ -262,6 +262,21 @@ def register_routes(app):
         if db.ip_already_banned(ip):
             return jsonify({"error": "identity not proven",
                             "reason": "this network address is banned"}), 403
+
+        meta_user_id = str(body.get("meta_user_id") or "").strip()
+        if db.meta_id_banned(meta_user_id):
+            return jsonify({"error": "identity not proven",
+                            "reason": "this account is banned"}), 403
+
+        if config.BLOCK_ANONYMISED_LOGIN:
+            verdict = netcheck.lookup(ip)
+            if verdict.anonymised:
+                kind = ("tor" if verdict.is_tor else
+                        "vpn" if verdict.is_vpn else
+                        "hosting" if verdict.is_hosting else "proxy")
+                routing.report_anonymised_login(ip, meta_user_id, verdict, kind)
+                return jsonify({"error": "identity not proven",
+                                "reason": "connect without a %s to play" % kind}), 403
         payload, status = serverauth.login(
             body.get("meta_user_id"),
             body.get("nonce"),

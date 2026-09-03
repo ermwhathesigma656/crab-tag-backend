@@ -132,6 +132,8 @@ class Config:
 
     # --- network reputation ----------------------------------------------
     NETCHECK_ENABLED = _bool("AC_NETCHECK", False)
+
+    BLOCK_ANONYMISED_LOGIN = _bool("AC_BLOCK_VPN_LOGIN", False)
     NETCHECK_PROVIDER = os.environ.get("AC_NETCHECK_PROVIDER", "proxycheck")
     PROXYCHECK_API_KEY = os.environ.get("AC_PROXYCHECK_KEY", "")
     VPNAPI_KEY = os.environ.get("AC_VPNAPI_KEY", "")
