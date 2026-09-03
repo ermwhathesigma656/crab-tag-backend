@@ -371,6 +371,22 @@ def register_routes(app):
             "bound_meta_user_id": owner["meta_user_id"] if owner else "",
         })
 
+    @app.post("/v1/admin/unban")
+    @degrade_on_db_failure
+    @require_admin_key
+    def admin_unban():
+        body = _json()
+        ip = (body.get("ip") or "").strip()
+        device_id = (body.get("device_id") or "").strip()
+        playfab_id = (body.get("playfab_id") or "").strip()
+        if not (ip or device_id or playfab_id):
+            return jsonify({"error": "ip, device_id or playfab_id required"}), 400
+        removed = db.clear_bans(ip=ip or None, device_id=device_id or None,
+                                playfab_id=playfab_id or None)
+        return jsonify({"ok": True, "removed": removed,
+                        "ip_banned": db.ip_already_banned(ip) if ip else False,
+                        "device_banned": db.device_banned(device_id) if device_id else False})
+
     @app.post("/v1/admin/unbind")
     @degrade_on_db_failure
     @require_admin_key

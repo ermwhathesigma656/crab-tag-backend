@@ -646,6 +646,23 @@ def unbind_device(device_id):
         return (cur.rowcount or 0) > 0
 
 
+def clear_bans(ip=None, device_id=None, playfab_id=None):
+    where, args = [], []
+    if ip:
+        where.append("ip=?"); args.append(ip)
+    if device_id:
+        where.append("device_id=?"); args.append(device_id)
+    if playfab_id:
+        where.append("playfab_id=?"); args.append(playfab_id)
+    if not where:
+        return 0
+    sql = ("DELETE FROM enforcements WHERE action LIKE 'ban_%' AND ("
+           + " OR ".join(where) + ")")
+    with tx() as conn:
+        cur = _exec(conn, sql, tuple(args))
+        return cur.rowcount or 0
+
+
 def device_banned(device_id):
     if not device_id:
         return False
