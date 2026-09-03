@@ -258,13 +258,16 @@ def register_routes(app):
     @degrade_on_db_failure
     def auth_login():
         body = _json()
+        ip = _client_ip()
+        if db.ip_already_banned(ip):
+            return jsonify({"error": "identity not proven",
+                            "reason": "this network address is banned"}), 403
         payload, status = serverauth.login(
             body.get("meta_user_id"),
             body.get("nonce"),
             body.get("integrity_token"),
         )
 
-        ip = _client_ip()
         if status == 200 and payload.get("playfab_id"):
             try:
                 db.record_login_ip(payload["playfab_id"], ip)
@@ -348,6 +351,40 @@ def register_routes(app):
     @require_admin_key
     def list_texts():
         return jsonify({"texts": db.list_texts()})
+
+    @app.post("/v1/enforce/check")
+    @degrade_on_db_failure
+    @require_server_key
+    def enforce_check():
+        body = _json()
+        device_id = (body.get("device_id") or "").strip()
+        playfab_id = (body.get("playfab_id") or "").strip()
+        ip = db.last_login_ip(playfab_id) if playfab_id else None
+        return jsonify({
+            "device_banned": db.device_banned(device_id),
+            "ip_banned": db.ip_already_banned(ip) if ip else False,
+            "ip": ip or "",
+        })
+
+    @app.post("/v1/enforce/ban")
+    @degrade_on_db_failure
+    @require_server_key
+    def enforce_ban():
+        body = _json()
+        playfab_id = (body.get("playfab_id") or "").strip()
+        device_id = (body.get("device_id") or "").strip()
+        reason = (body.get("reason") or "attestation failure")[:200]
+        if not playfab_id:
+            return jsonify({"error": "playfab_id required"}), 400
+        ip = db.last_login_ip(playfab_id) or ""
+        if device_id:
+            db.record_enforcement(action="ban_device", playfab_id=playfab_id,
+                                  device_id=device_id, reason=reason)
+        if ip:
+            db.record_enforcement(action="ban_ip", playfab_id=playfab_id, ip=ip,
+                                  device_id=device_id or None, reason=reason)
+        return jsonify({"ok": True, "ip": ip, "device_id": device_id,
+                        "ip_banned": bool(ip), "device_banned": bool(device_id)})
 
     # ------------------------------------------------------------------
     # 1. Challenge. Called by CloudScript on the player's behalf so the

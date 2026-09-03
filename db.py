@@ -606,6 +606,14 @@ def accounts_from_ip(ip):
     return int(row["n"]) if row else 0
 
 
+def device_banned(device_id):
+    if not device_id:
+        return False
+    with tx() as conn:
+        return _exec(conn, "SELECT 1 AS x FROM enforcements WHERE device_id=?"
+                           " AND action='ban_device' LIMIT 1", (device_id,)).fetchone() is not None
+
+
 def ip_already_banned(ip):
     if not ip:
         return False
