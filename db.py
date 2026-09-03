@@ -638,6 +638,14 @@ def bind_device(device_id, meta_user_id, playfab_id):
     return True
 
 
+def unbind_device(device_id):
+    if not device_id:
+        return False
+    with tx() as conn:
+        cur = _exec(conn, "DELETE FROM device_owners WHERE device_id=?", (device_id,))
+        return (cur.rowcount or 0) > 0
+
+
 def device_banned(device_id):
     if not device_id:
         return False

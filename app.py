@@ -371,6 +371,17 @@ def register_routes(app):
             "bound_meta_user_id": owner["meta_user_id"] if owner else "",
         })
 
+    @app.post("/v1/admin/unbind")
+    @degrade_on_db_failure
+    @require_admin_key
+    def admin_unbind():
+        body = _json()
+        device_id = (body.get("device_id") or "").strip()
+        if not device_id:
+            return jsonify({"error": "device_id required"}), 400
+        removed = db.unbind_device(device_id)
+        return jsonify({"ok": True, "device_id": device_id, "removed": removed})
+
     @app.post("/v1/enforce/bind")
     @degrade_on_db_failure
     @require_server_key
