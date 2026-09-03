@@ -379,6 +379,13 @@ def end_session(session_id):
 
 def record_detection(signal, severity, confidence, session=None, detail=None,
                      playfab_id=None, ip=None):
+    try:
+        severity = int(severity)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "detections.severity is BIGINT: pass a number, not %r. SQLite "
+            "accepts a string here and Postgres rejects it." % (severity,))
+
     sid = session["session_id"] if session else None
     pid = playfab_id or (session["playfab_id"] if session else None)
     muid = session["meta_user_id"] if session else None

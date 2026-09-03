@@ -474,7 +474,8 @@ def register_routes(app):
             return jsonify({"ok": True, "duplicate": True, "flagged": flagged})
 
         db.record_detection(
-            signal="modified_build", severity="block", confidence="reported",
+            signal="modified_build", severity=config.THRESHOLD_BLOCK,
+            confidence="reported",
             ip=ip, detail={"flagged": flagged, "signature": signature,
                            "device_id": device_id, "meta_user_id": meta_user_id,
                            "modules": modules[:200]},
